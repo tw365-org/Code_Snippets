@@ -29,7 +29,7 @@ function tw365_register_abuseipdb_widget() {
 
 	wp_add_dashboard_widget(
 		'tw365_abuseipdb_widget',           // Widget ID (HTML ID)
-		'🛡️ AbuseIPDB IP 信譽查詢 (TW365)', // Widget Title (標題)
+		'🛡️ My-AbuseIPDB-Dashboard-Widget 信譽查詢', // Widget Title (標題)
 		'tw365_render_abuseipdb_widget'     // Callback Function (內容渲染函式)
 	);
 }
