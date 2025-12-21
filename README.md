@@ -4,7 +4,7 @@
 
 ## 📂 內容列表
 
-目前收錄以下功能腳本：
+目前收錄以下功能的小工具 or 程式碼片段：
 
 ### 1. `My-AbuseIPDB-Dashboard-Widget.php`
 * **功能**：AbuseIPDB 儀表板小工具。
