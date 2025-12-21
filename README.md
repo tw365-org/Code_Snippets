@@ -1,6 +1,6 @@
 # WordPress 實用程式碼片段 (Code Snippets)
 
-這裡收集了我在開發 WordPress 網站時所撰寫或整理的實用 PHP 程式碼片段 (Snippets)。主要聚焦於解決特定的網站管理或功能需求，方便開發者快速取用。
+這裡收集了我的 AI 同事(Gemini 以及 GPT-5.2 )在開發 WordPress 網站時所撰寫或整理的實用 PHP 程式碼片段 (Snippets)。主要聚焦於解決特定的網站管理或功能需求，方便開發者快速取用。
 
 ## 📂 內容列表
 
