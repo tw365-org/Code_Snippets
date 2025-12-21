@@ -27,11 +27,6 @@
     * 將檔案上傳至 `wp-content/mu-plugins/` 資料夾（若無此資料夾請自行在 `wp-content` 下建立）。
     * WordPress 會自動執行該目錄下的 PHP 檔案，無需手動啟用，且無法在後台停用。
 
-3.  **整合至佈景主題 (Theme)**：
-    * 複製程式碼內容 (不包含開頭的 `<?php`)。
-    * 貼上至您子佈景主題 (Child Theme) 的 `functions.php` 檔案末端。
-    * *注意：直接修改 `functions.php` 風險較高，操作前請務必備份。*
-
 ## 📝 授權 (License)
 
 本專案採用 [GPL-3.0 授權](LICENSE)。歡迎自由使用、修改與分享。
