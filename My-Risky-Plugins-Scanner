@@ -1,0 +1,281 @@
+<?php
+/**
+ * Plugin Name: My-Risky-Plugins-Scanner
+ * Description: 掃描並列出「長期未更新(紅燈)」與「未測試合規(黃燈)」的風險外掛。
+ * Version: 1.1.0 (Feature/Yellow Light Warning)
+ * Author: WP Architect Team
+ * Date: 2024-12-27
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit; // Exit if accessed directly
+}
+
+class My_Risky_Plugins_Scanner {
+
+    private const TRANSIENT_KEY = 'my_risky_plugins_data_v1_1'; // 更新 Key 以避免舊快取干擾
+    private const CACHE_TIME    = 86400; // 24 Hours
+    private const ITEMS_PER_PAGE = 5;
+
+    public function __construct() {
+        add_action( 'wp_dashboard_setup', [ $this, 'add_dashboard_widget' ] );
+        add_action( 'wp_ajax_my_scan_plugins', [ $this, 'handle_scan_ajax' ] );
+        add_action( 'wp_ajax_my_paginate_risk', [ $this, 'handle_pagination_ajax' ] );
+    }
+
+    public function add_dashboard_widget() {
+        if ( current_user_can( 'manage_options' ) ) {
+            wp_add_dashboard_widget(
+                'my_risky_plugins_widget',
+                '<span>🛡️ My 外掛相容性與風險檢測</span>',
+                [ $this, 'render_widget' ]
+            );
+        }
+    }
+
+    public function render_widget() {
+        $risky_plugins = get_transient( self::TRANSIENT_KEY );
+        
+        echo '<div id="my-risk-wrapper">';
+        if ( false === $risky_plugins ) {
+            $this->render_scan_button();
+        } else {
+            $this->render_results( $risky_plugins, 1 );
+        }
+        echo '</div>';
+        $this->render_inline_script();
+    }
+
+    public function handle_scan_ajax() {
+        check_ajax_referer( 'my_risk_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( '權限不足' );
+
+        $results = $this->perform_scan();
+        set_transient( self::TRANSIENT_KEY, $results, self::CACHE_TIME );
+
+        ob_start();
+        $this->render_results( $results, 1 );
+        $html = ob_get_clean();
+
+        wp_send_json_success( [ 'html' => $html ] );
+    }
+
+    public function handle_pagination_ajax() {
+        check_ajax_referer( 'my_risk_nonce', 'nonce' );
+        $page = isset( $_POST['page'] ) ? absint( $_POST['page'] ) : 1;
+        $risky_plugins = get_transient( self::TRANSIENT_KEY );
+
+        if ( false === $risky_plugins ) wp_send_json_error( '快取已過期，請重新掃描' );
+
+        ob_start();
+        $this->render_results( $risky_plugins, $page );
+        $html = ob_get_clean();
+
+        wp_send_json_success( [ 'html' => $html ] );
+    }
+
+    /**
+     * 核心邏輯：執行外掛比對掃描 (含紅/黃燈判定)
+     */
+    private function perform_scan() {
+        if ( ! function_exists( 'get_plugins' ) ) require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        include_once( ABSPATH . 'wp-admin/includes/plugin-install.php' ); 
+
+        $all_plugins = get_plugins();
+        $risky_list  = [];
+        
+        global $wp_version;
+        // 移除版本號中的尾碼 (例如 6.4.2-alpha -> 6.4.2) 確保比較正確
+        $clean_wp_version = explode( '-', $wp_version )[0];
+        $current_major    = $this->get_major_version( $clean_wp_version );
+
+        foreach ( $all_plugins as $plugin_path => $data ) {
+            $slug = dirname( $plugin_path );
+            if ( '.' === $slug || empty( $slug ) ) $slug = basename( $plugin_path, '.php' );
+
+            $api_data = plugins_api( 'plugin_information', [
+                'slug'   => $slug,
+                'fields' => [ 'tested' => true ]
+            ]);
+
+            if ( is_wp_error( $api_data ) ) continue;
+
+            $tested_version = $api_data->tested;
+            $tested_major   = $this->get_major_version( $tested_version );
+
+            // 計算邏輯
+            $gap = (int)( $current_major * 10 ) - (int)( $tested_major * 10 );
+            $is_tested_less_than_current = version_compare( $tested_version, $clean_wp_version, '<' );
+
+            $status = '';
+            $reason = '';
+
+            // 判定順序：先判斷紅燈 (最嚴重)，再判斷黃燈
+            if ( $gap >= 3 ) {
+                // 紅燈條件：落後 3 個主要版本
+                $status = 'high'; // Red
+                $reason = '⚠️ 嚴重過期：僅測試至 WP ' . $tested_version;
+            } elseif ( $is_tested_less_than_current ) {
+                // 黃燈條件：未達紅燈，但 Tested < Current
+                $status = 'medium'; // Yellow
+                $reason = '✋ 相容性警告：尚未與您的 WP 版本 (' . $clean_wp_version . ') 測試 (目前: ' . $tested_version . ')';
+            }
+
+            if ( ! empty( $status ) ) {
+                $risky_list[] = [
+                    'name'    => $data['Name'],
+                    'slug'    => $slug,
+                    'version' => $data['Version'],
+                    'tested'  => $tested_version,
+                    'status'  => $status, // 'high' or 'medium'
+                    'reason'  => $reason
+                ];
+            }
+        }
+
+        // 排序：High (Red) 優先，Medium (Yellow) 次之
+        usort( $risky_list, function( $a, $b ) {
+            if ( $a['status'] === $b['status'] ) return 0;
+            return ( $a['status'] === 'high' ) ? -1 : 1;
+        });
+
+        return $risky_list;
+    }
+
+    private function get_major_version( $version ) {
+        $parts = explode( '.', $version );
+        if ( count( $parts ) >= 2 ) {
+            return (float)( $parts[0] . '.' . $parts[1] );
+        }
+        return (float) $version;
+    }
+
+    private function render_scan_button() {
+        ?>
+        <div style="text-align: center; padding: 20px;">
+            <p>尚未有檢測資料，請點擊下方按鈕開始掃描。</p>
+            <button id="my-start-scan" class="button button-primary">🚀 開始風險掃描</button>
+            <span class="spinner" style="float:none;"></span>
+        </div>
+        <?php
+    }
+
+    private function render_results( $data, $page ) {
+        $total_count = count( $data );
+        
+        // 統計各類風險數量
+        $high_count = 0;
+        $medium_count = 0;
+        foreach ( $data as $item ) {
+            if ( $item['status'] === 'high' ) $high_count++;
+            else $medium_count++;
+        }
+
+        // 決定 Banner 顏色與文字
+        if ( $high_count > 0 ) {
+            $bg_color    = '#d63638'; // Red
+            $icon        = 'dashicons-warning';
+            $status_text = "發現 {$high_count} 個高風險外掛" . ( $medium_count > 0 ? "，{$medium_count} 個警告" : "" );
+        } elseif ( $medium_count > 0 ) {
+            $bg_color    = '#f0b849'; // Yellow/Amber
+            $icon        = 'dashicons-flag';
+            $status_text = "發現 {$medium_count} 個相容性警告 (尚未測試)";
+        } else {
+            $bg_color    = '#00a32a'; // Green
+            $icon        = 'dashicons-yes-alt';
+            $status_text = "系統健康：無相容性風險";
+        }
+
+        // 輸出 Banner
+        // 注意：如果是黃色背景，文字顏色建議用深色以利閱讀，或是深黃色配白字。這裡使用 WP 原生 Warning 風格 (Amber border left) 或純色塊
+        // 為求統一美觀，這裡使用深黃色背景配白字
+        $text_color = '#fff';
+        if ( $medium_count > 0 && $high_count === 0 ) {
+             $bg_color = '#dba617'; // Darker yellow for better white text contrast
+        }
+
+        echo '<div style="background: ' . esc_attr( $bg_color ) . '; color: ' . esc_attr($text_color) . '; padding: 10px; margin-bottom: 15px; border-radius: 4px; display: flex; align-items: center;">';
+        echo '<span class="dashicons ' . esc_attr( $icon ) . '" style="margin-right: 8px; font-size: 24px; width: 24px; height: 24px;"></span>';
+        echo '<strong>' . esc_html( $status_text ) . '</strong>';
+        echo '</div>';
+
+        if ( $total_count === 0 ) return;
+
+        // 分頁與列表渲染
+        $total_pages = ceil( $total_count / self::ITEMS_PER_PAGE );
+        $page = max( 1, min( $page, $total_pages ) );
+        $offset = ( $page - 1 ) * self::ITEMS_PER_PAGE;
+        $paged_data = array_slice( $data, $offset, self::ITEMS_PER_PAGE );
+
+        echo '<ul style="margin: 0; padding: 0; list-style: none;">';
+        foreach ( $paged_data as $plugin ) {
+            $wp_org_url = 'https://tw.wordpress.org/plugins/' . esc_attr( $plugin['slug'] ) . '/';
+            
+            // 根據個別項目決定顏色
+            $text_color = ( $plugin['status'] === 'high' ) ? '#d63638' : '#dba617';
+            $icon_char  = ( $plugin['status'] === 'high' ) ? '⚠️' : '✋'; // 警告手勢 或 驚嘆號
+
+            echo '<li style="border-bottom: 1px solid #eee; padding: 8px 0;">';
+            echo '<div style="font-weight: 600; font-size: 14px; margin-bottom:2px;">' . esc_html( $plugin['name'] ) . '</div>';
+            
+            // 顯示原因
+            echo '<div style="color: ' . esc_attr( $text_color ) . '; font-size: 12px; margin-bottom: 4px;">';
+            echo esc_html( $plugin['reason'] );
+            echo '</div>';
+            
+            echo '<div>';
+            echo '<a href="' . esc_url( $wp_org_url ) . '" target="_blank" class="button button-small">查看頁面 <span class="dashicons dashicons-external" style="line-height: 24px; font-size: 14px;"></span></a>';
+            echo '</div>';
+            echo '</li>';
+        }
+        echo '</ul>';
+
+        if ( $total_pages > 1 ) {
+            echo '<div class="my-pagination" style="display: flex; justify-content: center; gap: 5px; margin-top: 15px; align-items: center;">';
+            echo '<button class="button my-pg-btn" data-page="1" ' . disabled( $page, 1, false ) . '>«</button>';
+            echo '<button class="button my-pg-btn" data-page="' . ( $page - 1 ) . '" ' . disabled( $page, 1, false ) . '>‹</button>';
+            echo '<span style="font-size: 12px; line-height: 28px; margin: 0 5px;">頁次 ' . esc_html( $page ) . ' / ' . esc_html( $total_pages ) . '</span>';
+            echo '<button class="button my-pg-btn" data-page="' . ( $page + 1 ) . '" ' . disabled( $page, $total_pages, false ) . '>›</button>';
+            echo '<button class="button my-pg-btn" data-page="' . esc_attr( $total_pages ) . '" ' . disabled( $page, $total_pages, false ) . '>»</button>';
+            echo '</div>';
+        }
+        
+        echo '<div style="text-align: right; margin-top: 10px;">';
+        echo '<button id="my-rescan" class="button-link" style="color: #666; font-size: 11px;">🔄 重新掃描 (清除快取)</button>';
+        echo '</div>';
+    }
+
+    private function render_inline_script() {
+        $nonce = wp_create_nonce( 'my_risk_nonce' );
+        ?>
+        <script type="text/javascript">
+        jQuery(document).ready(function($) {
+            var wrapper = $('#my-risk-wrapper');
+            var nonce = '<?php echo esc_js( $nonce ); ?>';
+            
+            // 綁定事件 (與之前相同，略微優化 Loading 體驗)
+            $(document).on('click', '#my-start-scan, #my-rescan', function(e) {
+                e.preventDefault();
+                wrapper.html('<div style="text-align:center; padding:20px;"><span class="spinner is-active" style="float:none; margin:0 auto 10px;"></span><p>正在分析外掛相容性...</p><p style="font-size:12px;color:#666;">可能需要連接 WordPress.org 資料庫</p></div>');
+                $.post(ajaxurl, { action: 'my_scan_plugins', nonce: nonce }, function(res) {
+                    wrapper.html(res.success ? res.data.html : '<div class="notice notice-error inline"><p>'+res.data+'</p></div>');
+                });
+            });
+
+            $(document).on('click', '.my-pg-btn', function(e) {
+                e.preventDefault();
+                var page = $(this).data('page');
+                $('.my-pagination .button').addClass('disabled');
+                wrapper.css('opacity', '0.5');
+                $.post(ajaxurl, { action: 'my_paginate_risk', nonce: nonce, page: page }, function(res) {
+                    wrapper.css('opacity', '1');
+                    wrapper.html(res.success ? res.data.html : '<div class="notice notice-error inline"><p>'+res.data+'</p></div>');
+                });
+            });
+        });
+        </script>
+        <?php
+    }
+}
+
+new My_Risky_Plugins_Scanner();
